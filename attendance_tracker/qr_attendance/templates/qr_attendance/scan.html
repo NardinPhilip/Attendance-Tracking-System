@@ -1,0 +1,249 @@
+<!-- qr_attendance/templates/qr_attendance/scan.html -->
+{% extends 'qr_attendance/base.html' %}
+{% load static %}
+
+{% block content %}
+<div class="container">
+    <h2 class="text-center mb-md">Scan QR Code</h2>
+    <div class="card qr-reader-card">
+        <div class="camera-select mb-md">
+            <label for="camera-select" class="sr-only">Select Camera</label>
+            <select id="camera-select" class="form-control">
+                <option value="">Select a camera</option>
+            </select>
+        </div>
+        <div id="reader" class="qr-reader"></div>
+        <p class="info text-center text-muted mb-sm">Point your camera at the QR code to record attendance.</p>
+    </div>
+    
+    <!-- Scan Feedback -->
+    <div id="scan-feedback" class="alert" role="alert" aria-live="polite"></div>
+
+    <!-- Scanned Attendees -->
+    <h3 class="text-center mb-md">Scanned Attendees</h3>
+    {% if attendances %}
+        <div class="card">
+            <table class="attendance-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Job Title</th>
+                        <th>Timestamp</th>
+                    </tr>
+                </thead>
+                <tbody id="scanned-list">
+                    {% for attendance in attendances %}
+                    <tr>
+                        <td>{{ attendance.attendee.name }}</td>
+                        <td>{{ attendance.attendee.job_title }}</td>
+                        <td>{{ attendance.timestamp|date:"Y-m-d H:i" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p class="info text-center text-muted">No attendees have been scanned yet.</p>
+    {% endif %}
+
+    <!-- End Attendance Button -->
+    <div class="end-attendance text-center mt-md">
+        <a href="{% url 'attendance_list' %}" class="btn btn-primary">End Attendance</a>
+    </div>
+</div>
+
+<!-- External Libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.4/html5-qrcode.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const feedbackDiv = document.getElementById('scan-feedback');
+    const scannedList = document.getElementById('scanned-list');
+    const cameraSelect = document.getElementById('camera-select');
+    const scannedCodes = new Set();
+    let html5QrcodeScanner = null;
+
+    // Handle successful QR scan
+    function onScanSuccess(decodedText, decodedResult) {
+        fetch(`/scan/${encodeURIComponent(decodedText)}/`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(response => response.json())
+        .then(data => {
+            feedbackDiv.textContent = data.message;
+            feedbackDiv.classList.remove('alert-success', 'alert-error', 'alert-info');
+            
+            if (data.status === 'success') {
+                feedbackDiv.classList.add('alert-success');
+                if (!scannedCodes.has(decodedText)) {
+                    const newRow = document.createElement('tr');
+                    const [name, jobTitle] = data.message.match(/for (.+) \((.+)\)/)?.slice(1) || ['Unknown', 'N/A'];
+                    newRow.innerHTML = `
+                        <td>${name}</td>
+                        <td>${jobTitle}</td>
+                        <td>${new Date().toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                    `;
+                    scannedList.insertBefore(newRow, scannedList.firstChild);
+                    newRow.classList.add('new-entry');
+                    setTimeout(() => newRow.classList.remove('new-entry'), 1000);
+                }
+            } else if (data.status === 'already_scanned') {
+                feedbackDiv.classList.add('alert-info');
+            } else {
+                feedbackDiv.classList.add('alert-error');
+            }
+
+            scannedCodes.add(decodedText);
+            setTimeout(() => feedbackDiv.textContent = '', 3000);
+        })
+        .catch(error => {
+            console.error('Scan Error:', error);
+            feedbackDiv.textContent = 'An error occurred while scanning.';
+            feedbackDiv.classList.add('alert-error');
+            setTimeout(() => feedbackDiv.textContent = '', 3000);
+        });
+    }
+
+    // Handle scan failure
+    function onScanFailure(error) {
+        console.warn(`QR scan error: ${error}`);
+    }
+
+    // Initialize and switch camera
+    function startScanner(cameraId) {
+        if (html5QrcodeScanner) {
+            html5QrcodeScanner.clear();
+        }
+        
+        html5QrcodeScanner = new Html5QrcodeScanner(
+            "reader",
+            { 
+                fps: 10, 
+                qrbox: { width: 400, height: 400 }, // Increased QR box size
+                aspectRatio: 1.0,
+                cameraId: cameraId || undefined
+            },
+            false
+        );
+        html5QrcodeScanner.render(onScanSuccess, onScanFailure);
+    }
+
+    // Populate camera dropdown
+    Html5Qrcode.getCameras().then(devices => {
+        if (devices && devices.length) {
+            devices.forEach(device => {
+                const option = document.createElement('option');
+                option.value = device.id;
+                option.text = device.label || `Camera ${cameraSelect.options.length + 1}`;
+                cameraSelect.appendChild(option);
+            });
+
+            if (devices.length > 0) {
+                cameraSelect.value = devices[0].id;
+                startScanner(devices[0].id);
+            }
+        } else {
+            feedbackDiv.textContent = 'No cameras found.';
+            feedbackDiv.classList.add('alert-error');
+        }
+    }).catch(err => {
+        console.error('Camera Error:', err);
+        feedbackDiv.textContent = 'Unable to access cameras.';
+        feedbackDiv.classList.add('alert-error');
+    });
+
+    cameraSelect.addEventListener('change', (e) => {
+        const selectedCameraId = e.target.value;
+        if (selectedCameraId) {
+            startScanner(selectedCameraId);
+        }
+    });
+});
+</script>
+
+<style>
+/* Scoped Styles for Scan Page */
+.qr-reader-card {
+    padding: var(--space-lg);
+    text-align: center;
+    max-width: 600px; /* Increased width for wider camera */
+    margin: 0 auto var(--space-lg) auto;
+}
+
+.qr-reader {
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.15);
+    width: 100%; /* Ensure it fills the card */
+    max-width: 500px; /* Slightly wider camera area */
+    margin: 0 auto;
+}
+
+.camera-select select {
+    width: 100%;
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-size: var(--font-base);
+    font-weight: 500;
+    color: var(--text);
+}
+
+.info {
+    font-size: calc(var(--font-base) * 1.1); /* Slightly larger text */
+    font-weight: 500;
+    letter-spacing: 0.02em; /* Subtle spacing for elegance */
+    color: var(--text-muted);
+}
+
+.scan-feedback:empty {
+    display: none;
+}
+
+.attendance-table {
+    width: 100%;
+}
+
+.attendance-table th,
+.attendance-table td {
+    font-size: calc(var(--font-base) * 1.05); /* Slightly larger for readability */
+    font-weight: 500;
+    padding: var(--space-md);
+}
+
+.attendance-table th {
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+.new-entry {
+    animation: slideIn 0.5s ease-out;
+    background: rgba(245, 158, 11, 0.1);
+}
+
+@keyframes slideIn {
+    from { transform: translateY(-20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+@media (max-width: 768px) {
+    .qr-reader-card {
+        max-width: 100%;
+        padding: var(--space-md);
+    }
+    .qr-reader {
+        max-width: 100%; /* Full width on mobile */
+    }
+    .attendance-table th, .attendance-table td {
+        padding: var(--space-sm);
+        font-size: var(--font-base);
+    }
+    .camera-select {
+        margin-bottom: var(--space-sm);
+    }
+    .info {
+        font-size: var(--font-base);
+    }
+}
+</style>
+{% endblock %}

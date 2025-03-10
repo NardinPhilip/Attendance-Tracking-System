@@ -1,0 +1,38 @@
+<!-- qr_attendance/templates/qr_attendance/attendee_list.html -->
+{% extends 'qr_attendance/base.html' %}
+{% block content %}
+<div class="container">
+    <h2>Attendee List</h2>
+    {% if attendees %}
+    <table class="attendee-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Job Title</th>
+                <th>QR Code</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for attendee in attendees %}
+            <tr>
+                <td>{{ attendee.name }}</td>
+                <td>{{ attendee.job_title }}</td>
+                <td>
+                    <img src="data:image/png;base64,{{ attendee.qr_code_image }}" alt="QR Code for {{ attendee.name }}" class="qr-code-img">
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <div class="download-btn">
+        <a href="{% url 'generate_qr_stickers' %}" class="btn btn-primary">Download QR Stickers as PDF</a>
+        <form action="{% url 'flush_attendees' %}" method="post" onsubmit="return confirm('Are you sure you want to clear all attendees? This action cannot be undone.');" style="display: inline;">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger">Clear Attendees</button>
+        </form>
+    </div>
+    {% else %}
+    <p class="info">No attendees found. Please upload an Excel file to add attendees.</p>
+    {% endif %}
+</div>
+{% endblock %}
