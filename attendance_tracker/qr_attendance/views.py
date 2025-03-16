@@ -1,184 +1,204 @@
 # qr_attendance/views.py
-from django.shortcuts import render, redirect, HttpResponse
-from django.http import JsonResponse
+from django.shortcuts import render, redirect
+from django.http import JsonResponse, HttpResponse, FileResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.db import transaction
 import pandas as pd
 import qrcode
-from PIL import Image, ImageDraw, ImageFont
-import uuid
-from .models import Attendee, Attendance
-from reportlab.lib.pagesizes import letter
+from PIL import Image
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader  # Import ImageReader
+from arabic_reshaper import reshape
+from bidi.algorithm import get_display
+from .models import Attendee, Attendance
+import uuid
+import os
+import logging
+from django.conf import settings
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Register Arabic fonts with error handling
+try:
+    font_dir = os.path.join(settings.STATICFILES_DIRS[0], 'fonts')
+    font_path = os.path.join(font_dir, 'Amiri-Regular.ttf')
+    bold_font_path = os.path.join(font_dir, 'Amiri-Bold.ttf')
+    if not os.path.exists(font_path) or not os.path.exists(bold_font_path):
+        raise FileNotFoundError(f"Font files not found in {font_dir}")
+    pdfmetrics.registerFont(TTFont('Amiri', font_path))
+    pdfmetrics.registerFont(TTFont('Amiri-Bold', bold_font_path))
+    logger.info("Fonts registered successfully")
+except Exception as e:
+    logger.error(f"Font registration failed: {str(e)}")
+    raise
 
 def upload_excel(request):
     if request.method == 'POST':
         excel_file = request.FILES['excel_file']
         try:
             df = pd.read_excel(excel_file)
+            attendees_to_create = []
+            existing_attendees = set(
+                Attendee.objects.values_list('name', 'job_title', flat=False)
+            )
             duplicates = []
-            for index, row in df.iterrows():
+            for _, row in df.iterrows():
                 name = row['Name']
                 job_title = row['Job Title']
-                if not Attendee.objects.filter(name=name, job_title=job_title).exists():
-                    Attendee.objects.create(
-                        name=name,
-                        job_title=job_title,
-                        qr_code=str(uuid.uuid4())
+                key = (name, job_title)
+                if key not in existing_attendees:
+                    attendees_to_create.append(
+                        Attendee(name=name, job_title=job_title, qr_code=str(uuid.uuid4()))
                     )
                 else:
                     duplicates.append(f"{name} ({job_title})")
+            if attendees_to_create:
+                with transaction.atomic():
+                    Attendee.objects.bulk_create(attendees_to_create, batch_size=500)
             if duplicates:
-                error_msg = "The following entries were skipped as they already exist: " + ", ".join(duplicates)
+                error_msg = "Skipped duplicates: " + ", ".join(duplicates)
                 return render(request, 'qr_attendance/upload.html', {'error': error_msg})
             return redirect('attendee_list')
         except Exception as e:
+            logger.error(f"Upload error: {str(e)}")
             return render(request, 'qr_attendance/upload.html', {'error': str(e)})
     return render(request, 'qr_attendance/upload.html')
 
-# qr_attendance/views.py
-from django.http import HttpResponse
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-from .models import Attendee
-import qrcode
-from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
-
 def generate_qr_stickers(request):
-    attendees = Attendee.objects.all()
-    response = HttpResponse(content_type='application/pdf')
-    response['Content-Disposition'] = 'attachment; filename="qr_stickers.pdf"'
-    
-    c = canvas.Canvas(response, pagesize=letter)
-    width, height = letter  # 612.0 x 792.0 points (floats)
-    
-    # Convert to integers for PIL
-    page_width = int(width)   # 612 pixels
-    page_height = int(height) # 792 pixels
-    
-    for attendee in attendees:
-        # Generate QR code
-        qr = qrcode.QRCode(
-            version=None,  # Auto-determine version
-            error_correction=qrcode.constants.ERROR_CORRECT_H,  # High error correction
-            box_size=15,   # Box size for clarity
-            border=4       # Border for padding
-        )
-        # Use only the UUID or relative path, not the full URL
-        qr.add_data(f"/scan/{attendee.qr_code}")  # Relative path
-        qr.make(fit=True)
-        qr_img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Calculate QR code size to leave space for text (above and below)
-        qr_width = page_width - 100   # Leave 50 pixels on each side
-        qr_height = page_height - 200 # Leave 100 pixels top and bottom for text
-        qr_resized = qr_img.resize((qr_width, qr_height))  # e.g., 512x592
-        
-        # Create full-page image with white background
-        full_page = Image.new('RGB', (page_width, page_height), 'white')  # 612x792
-        draw = ImageDraw.Draw(full_page)
-        
-        # Center the QR code vertically and horizontally
-        qr_x = (page_width - qr_width) // 2  # e.g., (612 - 512) / 2 = 50
-        qr_y = (page_height - qr_height) // 2  # e.g., (792 - 592) / 2 = 100
-        full_page.paste(qr_resized, (qr_x, qr_y))
-        
-        # Load fonts
-        try:
-            font = ImageFont.truetype("arial.ttf", 40)
-            bold_font = ImageFont.truetype("arialbd.ttf", 40)
-        except:
-            font = ImageFont.load_default()
-            bold_font = font
-        
-        # Add text in reserved areas (above and below QR code)
-        welcome_text = "Welcome to ACOC25 IFTAR"
-        name_text = f"Name: {attendee.name}"
-        
-        # Calculate text positions (centered horizontally)
-        welcome_bbox = draw.textbbox((0, 0), welcome_text, font=bold_font)
-        welcome_width = welcome_bbox[2] - welcome_bbox[0]
-        name_bbox = draw.textbbox((0, 0), name_text, font=font)
-        name_width = name_bbox[2] - name_bbox[0]
-        
-        welcome_x = (page_width - welcome_width) // 2  # Center horizontally
-        name_x = (page_width - name_width) // 2
-        draw.text((welcome_x, 30), welcome_text, font=bold_font, fill="black")  # Above QR
-        draw.text((name_x, page_height - 70), name_text, font=font, fill="black")  # Below QR
-        
-        # Save to BytesIO (no rotation)
-        page_buffer = BytesIO()
-        full_page.save(page_buffer, format="PNG")
-        page_buffer.seek(0)
-        
-        # Use ImageReader for ReportLab
-        page_image = ImageReader(page_buffer)
-        
-        # Draw to fill the entire page
-        c.drawImage(page_image, 0, 0, width=width, height=height, preserveAspectRatio=False)
-        c.showPage()  # One page per QR code
-    
-    c.save()
-    return response
-
-# qr_attendance/views.py
-from django.http import JsonResponse
-from .models import Attendee, Attendance
-
-def scan_qr(request, code):
-    # Extract UUID from the code (handles "/scan/<uuid>" or just "<uuid>")
     try:
-        # If code is a path like "/scan/<uuid>", extract the UUID
-        if code.startswith('/scan/'):
-            code = code.split('/scan/')[1].strip('/')  # e.g., "842d0764-dded-4f3d-b7c5-eb1a2a60ddc1"
+        buffer = BytesIO()
+        p = canvas.Canvas(buffer, pagesize=A4)
+        attendees = Attendee.objects.all()
+        if not attendees.exists():
+            return HttpResponse("No attendees found", status=404)
         
-        # Look up attendee by UUID
-        attendee = Attendee.objects.get(qr_code=code)
+        qr_size = 180 * mm
+        qr_configs = []
+        for attendee in attendees:
+            qr = qrcode.QRCode(
+                version=2,
+                error_correction=qrcode.constants.ERROR_CORRECT_H,
+                box_size=18,
+                border=4
+            )
+            qr.add_data(attendee.qr_code)
+            qr.make(fit=True)
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            qr_buffer = BytesIO()
+            qr_img.save(qr_buffer, format="PNG")
+            qr_buffer.seek(0)  # Reset buffer position
+            qr_configs.append((attendee, qr_buffer))
         
-        # Check if already scanned
-        if Attendance.objects.filter(attendee=attendee).exists():
-            return JsonResponse({
-                'status': 'already_scanned',
-                'message': f'{attendee.name} ({attendee.job_title}) has already attended.'
-            })
-        else:
-            # Record attendance
-            Attendance.objects.create(attendee=attendee)
-            return JsonResponse({
-                'status': 'success',
-                'message': f'Successfully recorded attendance for {attendee.name} ({attendee.job_title}).'
-            })
-    except Attendee.DoesNotExist:
-        return JsonResponse({
-            'status': 'not_found',
-            'message': 'QR code not found or invalid.'
-        })
+        top_margin = 20 * mm
+        welcome_font_size = 60
+        name_font_size = 60
+        for attendee, qr_buffer in qr_configs:
+            page_center_x = A4[0] / 2
+            welcome_y_start = A4[1] - top_margin - (welcome_font_size * 1.5 / 2.83465) * 2
+            qr_y = (A4[1] - qr_size) / 2 - 5 * mm
+            
+            welcome_text_part1 = "Welcome to"
+            welcome_text_part2 = "ACOC25 Iftar"
+            reshaped_part1 = reshape(welcome_text_part1)
+            bidi_part1 = get_display(reshaped_part1)
+            reshaped_part2 = reshape(welcome_text_part2)
+            bidi_part2 = get_display(reshaped_part2)
+            
+            p.setFont("Amiri-Bold", welcome_font_size)
+            line_height = welcome_font_size * 2.3 / 2.83465
+            text_y = welcome_y_start
+            p.drawCentredString(page_center_x, text_y, bidi_part1)
+            text_y -= line_height
+            p.drawCentredString(page_center_x, text_y, bidi_part2)
+            
+            # Use ImageReader to wrap the BytesIO object
+            qr_image = ImageReader(qr_buffer)
+            p.drawImage(qr_image, (A4[0] - qr_size) / 2, qr_y, width=qr_size, height=qr_size, mask='auto')
+            
+            name_text = get_display(reshape(attendee.name))
+            name_y = qr_y - 30 * mm
+            p.setFont("Amiri-Bold", name_font_size)
+            p.drawCentredString(page_center_x, name_y, name_text)
+            
+            p.showPage()
+            qr_buffer.close()
+        
+        p.save()
+        buffer.seek(0)
+        return FileResponse(buffer, as_attachment=True, filename='qr_stickers.pdf')
     except Exception as e:
-        # Catch unexpected errors (e.g., malformed input)
-        return JsonResponse({
-            'status': 'error',
-            'message': f'Error processing QR code: {str(e)}'
-        })
-
-def attendance_list(request):
-    attendances = Attendance.objects.all().order_by('-timestamp')
-    return render(request, 'qr_attendance/attendance_list.html', {
-        'attendances': attendances
-    })
+        logger.error(f"QR generation failed: {str(e)}")
+        return HttpResponse(f"Error generating QR stickers: {str(e)}", status=500)
 
 def attendee_list(request):
-    attendees = Attendee.objects.all()
-    for attendee in attendees:
-        attendee.qr_code_image = attendee.get_qr_code_image()
+    attendees = Attendee.objects.all()[:25]
+    total_attendees = Attendee.objects.count()
     return render(request, 'qr_attendance/attendee_list.html', {
-        'attendees': attendees
+        'attendees': attendees,
+        'total_attendees': total_attendees
     })
 
+@require_http_methods(["GET"])
+def get_attendees_paginated(request):
+    try:
+        page = int(request.GET.get('page', 1))
+        per_page = int(request.GET.get('per_page', 25))
+        start = (page - 1) * per_page
+        end = start + per_page
+        attendees = Attendee.objects.all()[start:end]
+        total_attendees = Attendee.objects.count()
+        data = [{
+            'name': attendee.name,
+            'job_title': attendee.job_title,
+            'qr_code': attendee.qr_code
+        } for attendee in attendees]
+        return JsonResponse({
+            'status': 'success',
+            'attendees': data,
+            'total': total_attendees,
+            'page': page,
+            'per_page': per_page
+        })
+    except Exception as e:
+        logger.error(f"Pagination error: {str(e)}")
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
+@require_http_methods(["GET", "POST"])
+@csrf_exempt
+def scan_qr(request, code):
+    try:
+        attendee = Attendee.objects.get(qr_code=code)
+        if request.method == "GET":
+            return JsonResponse({"status": "success", "name": attendee.name, "job_title": attendee.job_title})
+        elif request.method == "POST":
+            if Attendance.objects.filter(attendee=attendee).exists():
+                return JsonResponse({"status": "exists", "message": "Attendance already recorded."})
+            attendance = Attendance.objects.create(attendee=attendee)
+            return JsonResponse({
+                "status": "success",
+                "message": "Attendance recorded successfully.",
+                "timestamp": attendance.timestamp.strftime("%Y-%m-%d %H:%M")
+            })
+    except Attendee.DoesNotExist:
+        return JsonResponse({"status": "error", "message": "Invalid QR code."}, status=404)
+    except Exception as e:
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+
+def attendance_list(request):
+    attendances = Attendance.objects.all().order_by('-timestamp')[:25]
+    return render(request, 'qr_attendance/attendance_list.html', {'attendances': attendances})
+
 def scan_page(request):
-    attendances = Attendance.objects.all().order_by('-timestamp')
-    return render(request, 'qr_attendance/scan.html', {
-        'attendances': attendances
-    })
+    attendances = Attendance.objects.all().order_by('-timestamp')[:25]
+    return render(request, 'qr_attendance/scan.html', {'attendances': attendances})
 
 def flush_attendees(request):
     if request.method == 'POST':

@@ -1,28 +1,29 @@
 # qr_attendance/models.py
 from django.db import models
-import qrcode
-from io import BytesIO
-import base64
 
 class Attendee(models.Model):
-    name = models.CharField(max_length=100)
-    job_title = models.CharField(max_length=100)
-    qr_code = models.CharField(max_length=100, unique=True, null=True)
+    name = models.CharField(max_length=100, db_index=True)  # Indexed for faster lookups
+    job_title = models.CharField(max_length=100, db_index=True)  # Indexed for faster lookups
+    qr_code = models.CharField(max_length=100, unique=True, null=True, db_index=True)  # Indexed for scan lookups
     created_at = models.DateTimeField(auto_now_add=True)
 
-    def get_qr_code_image(self):
-        qr = qrcode.QRCode(version=1, box_size=5, border=2)
-        qr.add_data(self.qr_code)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Convert image to base64
-        buffered = BytesIO()
-        img.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        return img_str
+    class Meta:
+        indexes = [
+            models.Index(fields=['name', 'job_title']),  # Composite index for duplicate checks
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.job_title})"
 
 class Attendance(models.Model):
     attendee = models.ForeignKey(Attendee, on_delete=models.CASCADE)
-    timestamp = models.DateTimeField(auto_now_add=True)
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)  # Indexed for ordering
     status = models.CharField(max_length=20, default='Present')
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['attendee', 'timestamp']),  # For filtering and ordering
+        ]
+
+    def __str__(self):
+        return f"{self.attendee.name} - {self.timestamp}"
